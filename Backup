@@ -6,142 +6,94 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
-import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.util.EntityUtils;
 
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.HashSet;
-import java.util.Set;
-
-class ConfigLoader {
-    public static String getAuth() {
-        String auth = System.getenv("APP_AUTH");
-        if (auth == null || auth.isEmpty()) {
-            throw new RuntimeException("Переменная окружения APP_AUTH не установлена");
-        }
-        return auth;
-    }
-
-    public static int getCheckIntervalMs() {
-        String intervalStr = System.getenv("APP_CHECK_INTERVAL_MS");
-        if (intervalStr == null || intervalStr.isEmpty()) {
-            return 60000; // значение по умолчанию: 60 секунд
-        }
-        try {
-            return Integer.parseInt(intervalStr);
-        } catch (NumberFormatException e) {
-            System.err.println("Некорректное значение APP_CHECK_INTERVAL_MS, используется значение по умолчанию");
-            return 60000;
-        }
-    }
-
-    public static Map<String, String> getLoginToExecutorId() {
-        Map<String, String> result = new HashMap<>();
-        Map<String, String> env = System.getenv();
-        if (env != null) {  // Защита от null
-            for (Map.Entry<String, String> entry : env.entrySet()) {
-                if (entry.getKey().startsWith("LOGIN_TO_EXECUTOR_")) {
-                    String login = entry.getKey().replace("LOGIN_TO_EXECUTOR_", "");
-                    result.put(login, entry.getValue());
-                }
-            }
-        }
-        if (result.isEmpty()) {
-            result.put("ikornilov", "319");
-            result.put("employee-1", "329");
-        }
-        return result;
-    }
-}
+import java.util.stream.Collectors;
 
 public class MainApp {
-    private static final String AUTH = ConfigLoader.getAuth();
+    private static final String AUTH = "Basic YWRtaW46N2ovSy04TGJCPw==";
     private static final String BASE_URL = "https://test1232.intraservice.ru/api/task";
     private static final String ACTIVE_LINE_URL = "http://192.168.100.114/api/v1/line/active";
-    private static final int CHECK_INTERVAL_MS = ConfigLoader.getCheckIntervalMs();
+    private static final int CHECK_INTERVAL_MS = 60000; // 60 секунд
+    private static final Set<Integer> PROCESSED_TASK_IDS = new HashSet<>();
     private static final AtomicBoolean IS_RUNNING = new AtomicBoolean(false);
-    private static int PROCESSED_TASK_N = 0; // пример счётчика
-    private static final Set<Integer> PROCESSED_TASK_CASH = Collections.synchronizedSet(new HashSet<>());
-    private static final Set<Integer> PROCESSED_TASK_IDS = Collections.synchronizedSet(new HashSet<>());
-    private static final long CLEAR_CACHE_INTERVAL_MS = 24 * 60 * 60 * 1000L; // 24 часа
-    private static long lastCacheClearTime = System.currentTimeMillis();
-    private static String getCurrentGmt3Time() {
-        ZoneId gmt3 = ZoneId.of("Europe/Moscow"); // GMT+3 соответствует Москве
-        LocalDateTime now = LocalDateTime.now(gmt3);
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss");
-        return now.format(formatter);
-    }
-    private static final Map<String, String> LOGIN_TO_EXECUTOR_ID = ConfigLoader.getLoginToExecutorId();
 
-//    static {
-//        Map<String, String> tempMap = new HashMap<>();
-//        tempMap.put("ikornilov", "319");
-//        tempMap.put("employee-1", "329");
-//        LOGIN_TO_EXECUTOR_ID = Collections.unmodifiableMap(tempMap);
-//    }
+    // Соответствие логинов и executorId
+
+    private static final Map<String, String> LOGIN_TO_EXECUTOR_ID;
+
+    static {
+        Map<String, String> tempMap = new HashMap<>();
+        tempMap.put("ikornilov", "319");
+        tempMap.put("employee-1", "329");
+        LOGIN_TO_EXECUTOR_ID = Collections.unmodifiableMap(tempMap);
+    }
 
     public static void main(String[] args) {
-        System.out.println("[INIT] Application starting with Corretto 25...");
-
-        startProcessing();
+        Thread processingThread = new Thread(MainApp::processTasks);
+        processingThread.setDaemon(true);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("[SHUTDOWN] Received stop signal. Stopping processing...");
+            System.out.println("\nПолучен сигнал завершения. Останавливаем обработку...");
             IS_RUNNING.set(false);
         }));
 
+        Scanner scanner = new Scanner(System.in);
+        System.out.println("Приложение запущено. Доступные команды:");
+        System.out.println("  start — запустить обработку задач");
+        System.out.println("  stop — остановить обработку задач");
+        System.out.println("  status — показать статус");
+        System.out.println("  exit — выйти из приложения");
 
-        try {
-            Thread.currentThread().join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.out.println("[SHUTDOWN] Application interrupted");
+        while (true) {
+            System.out.print("\nВведите команду: ");
+            String command = scanner.nextLine().trim().toLowerCase();
+
+            switch (command) {
+                case "start":
+                    if (!IS_RUNNING.get()) {
+                        IS_RUNNING.set(true);
+                        processingThread.start();
+                        System.out.println("Обработка задач запущена.");
+                    } else {
+                        System.out.println("Обработка уже запущена.");
+                    }
+                    break;
+                case "stop":
+                    IS_RUNNING.set(false);
+                    System.out.println("Остановка обработки...");
+                    break;
+                case "status":
+                    System.out.println("Статус: " + (IS_RUNNING.get() ? "Обработка запущена" : "Обработка остановлена"));
+                    System.out.println("Обработано задач: " + PROCESSED_TASK_IDS.size());
+                    break;
+                case "exit":
+                    IS_RUNNING.set(false);
+                    scanner.close();
+                    System.exit(0);
+                    break;
+                default:
+                    System.out.println("Неизвестная команда. Попробуйте: start, stop, status, exit");
+                    break;
+            }
         }
-
-        System.out.println("[EXIT] Application stopped");
-    }
-
-    private static void startProcessing() {
-        IS_RUNNING.set(true);
-        Thread processingThread = new Thread(MainApp::processTasks);
-        processingThread.setDaemon(false);
-        processingThread.setName("TaskProcessor");
-        processingThread.start();
-        System.out.println("[INFO] Processing started on thread: " + processingThread.getName());
-    }
-
-    private static void printStatus() {
-        System.out.println("Статус: " + (IS_RUNNING.get() ? "Обработка запущена" : "Обработка остановлена"));
-        System.out.println("Обработано задач: " + PROCESSED_TASK_IDS);
     }
 
     private static void processTasks() {
-
-        //HttpClient client = HttpClientBuilder.create().build();
+        HttpClient client = HttpClientBuilder.create().build();
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        RequestConfig requestConfig = RequestConfig.custom()
-                .setConnectTimeout(10000)      // 10 с на подключение
-                .setSocketTimeout(30000)       // 30 с на получение ответа
-                .build();
 
-        HttpClient client = HttpClientBuilder.create()
-                .setDefaultRequestConfig(requestConfig)
-                .build();
         while (IS_RUNNING.get()) {
             try {
-                System.out.println("[INFO] Получение списка задач... " + getCurrentGmt3Time());
+                System.out.println("[INFO] Получение списка задач... " + new java.util.Date());
                 HttpGet getRequest = new HttpGet(BASE_URL + "?StatusIds=31&fields=Id,Name,StatusId,Creator,ExecutorIds");
                 getRequest.setHeader("Authorization", AUTH);
 
@@ -150,24 +102,12 @@ public class MainApp {
 
                 if (response.getStatusLine().getStatusCode() == 200) {
                     TaskList tasks = mapper.readValue(responseBody, TaskList.class);
-
-                    if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
-                        clearProcessedTasksCache();
-                    }
-                    List<Task> unprocessedTasks = new ArrayList<>();
-                    for (Task task : tasks.getTasks()) {
-                        if (!PROCESSED_TASK_IDS.contains(task.getId())) {
-                            unprocessedTasks.add(task);
-                        }
-                    }
-
-                    System.out.println("[INFO] Найдено новых задач для обработки: " + unprocessedTasks.size());
+                    System.out.println("[INFO] Найдено задач для обработки: " + tasks.getTasks().size());
 
                     // Получаем список сотрудников на смене
                     List<String> activeEmployees = getActiveEmployees(client, mapper);
 
-                    // Обрабатываем только отфильтрованный список
-                    for (Task task : unprocessedTasks) {
+                    for (Task task : tasks.getTasks()) {
                         if (!IS_RUNNING.get()) break;
                         processTask(client, task, activeEmployees);
                     }
@@ -194,6 +134,7 @@ public class MainApp {
         }
     }
 
+    // Получаем список активных сотрудников
     private static List<String> getActiveEmployees(HttpClient client, ObjectMapper mapper) {
         try {
             HttpGet getRequest = new HttpGet(ACTIVE_LINE_URL);
@@ -220,6 +161,7 @@ public class MainApp {
         return Collections.emptyList();
     }
 
+    // Определяем сотрудника с наименьшим количеством задач
     private static String findLeastLoadedEmployee(HttpClient client, List<String> employees) {
         String selectedEmployee = null;
         int minCount = Integer.MAX_VALUE;
@@ -253,34 +195,29 @@ public class MainApp {
     }
 
     private static void processTask(HttpClient client, Task task, List<String> activeEmployees) {
-        int taskId = task.getId();
         String executorIds = task.getExecutorIds();
 
-        // Пропускаем задачи с исполнителем и добавляем в кэш
-        if (executorIds != null && !executorIds.isEmpty()) {
-            System.out.println("[SKIPPED] Задача №" + taskId + " уже имеет исполнителя: " + executorIds);
-            PROCESSED_TASK_IDS.add(taskId); // Добавляем в кэш
-            return;
-        }
+        if (executorIds == null || executorIds.isEmpty()) {
+            // Находим наименее загруженного сотрудника
+            String targetExecutorId = findLeastLoadedEmployee(client, activeEmployees);
 
-        // Находим наименее загруженного сотрудника
-        String targetExecutorId = findLeastLoadedEmployee(client, activeEmployees);
-
-        if (targetExecutorId != null) {
-            try {
-                updateTask(client, taskId, targetExecutorId);
-                System.out.println("[SUCCESS] Задача №" + taskId +
-                        " назначена на сотрудника с ID " + targetExecutorId);
-                PROCESSED_TASK_IDS.add(taskId); // Добавляем в кэш только при успешном назначении
-            } catch (Exception e) {
-                System.err.println("[ERROR] Ошибка обработки задачи №" + taskId +
-                        ": " + e.getMessage());
-                // Не добавляем в кэш при ошибке обновления задачи
+            if (targetExecutorId != null) {
+                try {
+                    updateTask(client, task.getId(), targetExecutorId);
+                    PROCESSED_TASK_IDS.add(task.getId());
+                    System.out.println("[SUCCESS] Задача №" + task.getId() +
+                            " назначена на сотрудника с ID " + targetExecutorId);
+                } catch (Exception e) {
+                    System.err.println("[ERROR] Ошибка обработки задачи №" + task.getId() +
+                            ": " + e.getMessage());
+                }
+            } else {
+                System.out.println("[WARNING] Не удалось найти подходящего сотрудника для задачи №" +
+                        task.getId() + ". Пропускаем.");
             }
         } else {
-            System.out.println("[WARNING] Не удалось найти подходящего сотрудника для задачи №" +
-                    taskId + ". Пропускаем. Будет обработана в следующем цикле.");
-            // НЕ добавляем в кэш — задача будет обработана снова в следующем цикле
+            System.out.println("[SKIPPED] Задача №" + task.getId() +
+                    " уже имеет исполнителя");
         }
     }
 
@@ -303,6 +240,20 @@ public class MainApp {
             throw new IOException("HTTP error: " + response.getStatusLine());
         }
     }
+
+//    @JsonIgnoreProperties(ignoreUnknown = true)
+//    public static class ActiveLineResponse {
+//        @JsonProperty("employees")
+//        private List<Employee> employees;
+//
+//        public List<Employee> getEmployees() {
+//            return employees != null ? employees : new ArrayList<>();
+//        }
+//
+//        public void setEmployees(List<Employee> employees) {
+//            this.employees = employees;
+//        }
+//    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Employee {
@@ -414,11 +365,5 @@ public class MainApp {
         public void setServices(List<Object> services) {
             this.services = services;
         }
-    }
-    private static void clearProcessedTasksCache() {
-        int removedCount = PROCESSED_TASK_IDS.size();
-        PROCESSED_TASK_IDS.clear();
-        System.out.println("[CACHE] Очищено " + removedCount + " записей из кэша обработанных задач (ежедневная очистка)");
-        lastCacheClearTime = System.currentTimeMillis();
     }
 }

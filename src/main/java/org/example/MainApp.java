@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class ConfigLoader {
     public static String getAuth() {
@@ -85,7 +86,8 @@ public class MainApp {
     private static long lastCacheClearTime = System.currentTimeMillis();
     private static final Map<String, String> LOGIN_TO_EXECUTOR_ID = ConfigLoader.getLoginToExecutorId();
     private static final ObjectMapper mapper = new ObjectMapper();
-
+    private static final AtomicInteger currentEmployeeIndex = new AtomicInteger(0);
+    private static volatile List<String> currentActiveEmployees = Collections.synchronizedList(new ArrayList<>());
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -269,6 +271,16 @@ public class MainApp {
                         log("DEBUG", "Сотрудник " + displayName + " пропущен (нет в конфигурации)");
                     }
                 }
+
+                // Обновляем глобальный список и сбрасываем индекс при изменении состава
+                synchronized (currentActiveEmployees) {
+                    if (!currentActiveEmployees.equals(result)) {
+                        currentActiveEmployees.clear();
+                        currentActiveEmployees.addAll(result);
+                        currentEmployeeIndex.set(0); // Сбрасываем счётчик при изменении списка
+                        log("INFO", "Обновлён список активных сотрудников. Теперь: " + currentActiveEmployees);
+                    }
+                }
                 return result;
             } else {
                 log("ERROR", "Ошибка получения списка активных сотрудников: код " + statusCode);
@@ -279,58 +291,6 @@ public class MainApp {
         return Collections.emptyList();
     }
 
-    private static String findLeastLoadedEmployee(CloseableHttpClient client, List<String> employees) {
-        log("DEBUG", "Поиск наименее загруженного сотрудника среди: " + employees);
-        String selectedEmployee = null;
-        int minCount = Integer.MAX_VALUE;
-
-        for (String employeeLogin : employees) {
-            String executorId = LOGIN_TO_EXECUTOR_ID.get(employeeLogin);
-            log("DEBUG", "Проверка нагрузки сотрудника: " + employeeLogin + " (ID: " + executorId + ")");
-
-            try {
-                String url = BASE_URL + "?StatusIds=27&fields=Id&ExecutorIds=" + executorId;
-                log("DEBUG", "Запрос нагрузки: " + url);
-
-                HttpGet getRequest = new HttpGet(url);
-                getRequest.setHeader("Authorization", AUTH);
-                HttpResponse response = client.execute(getRequest);
-
-                int statusCode = response.getStatusLine().getStatusCode();
-                if (statusCode == 200) {
-                    String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
-                    TaskList taskList = mapper.readValue(responseBody, TaskList.class);
-                    int count = taskList.getTasks().size();
-                    log("DEBUG", "Сотрудник " + employeeLogin + ": " + count + " задач в работе");
-
-                    if (count < minCount) {
-                        minCount = count;
-                        selectedEmployee = executorId;
-                        log("DEBUG", "Выбран как наименее загруженный: " + employeeLogin);
-                    } else if (count == minCount && selectedEmployee == null) {
-                        // Случайный выбор при равном количестве задач
-                        selectedEmployee = new Random().nextBoolean() ? executorId : selectedEmployee;
-                        log("DEBUG", "Случайный выбор сотрудника " + employeeLogin +
-                                " при равной загрузке");
-                    }
-                } else {
-                    log("WARNING", "Ошибка проверки нагрузки сотрудника " + employeeLogin +
-                            ": код " + statusCode);
-                }
-            } catch (Exception e) {
-                logError("Ошибка при проверке нагрузки сотрудника " + employeeLogin, e);
-            }
-        }
-
-        if (selectedEmployee != null) {
-            log("INFO", "Найден наименее загруженный сотрудник: " + selectedEmployee +
-                    " с " + minCount + " задачами");
-        } else {
-            log("WARNING", "Не удалось найти подходящего сотрудника — нет доступных исполнителей");
-        }
-
-        return selectedEmployee;
-    }
 
     private static void processTask(CloseableHttpClient client, Task task, List<String> activeEmployees) {
         int taskId = task.getId();
@@ -347,25 +307,31 @@ public class MainApp {
             return;
         }
 
-        // Находим наименее загруженного сотрудника
-        log("DEBUG", "Поиск наименее загруженного сотрудника для задачи №" + taskId);
-        String targetExecutorId = findLeastLoadedEmployee(client, activeEmployees);
+        // Получаем актуальный список сотрудников
+        List<String> employeesForAssignment = currentActiveEmployees;
 
-        if (targetExecutorId != null) {
-            try {
-                log("DEBUG", "Попытка назначить задачу №" + taskId +
-                        " на сотрудника с ID " + targetExecutorId);
-                updateTask(client, taskId, targetExecutorId);
-                log("SUCCESS", "Задача №" + taskId +
-                        " назначена на сотрудника с ID " + targetExecutorId);
-                PROCESSED_TASK_IDS.add(taskId);
-            } catch (Exception e) {
-                logError("Ошибка обновления задачи №" + taskId, e);
-            }
-        } else {
-            log("WARNING", "Не удалось найти подходящего сотрудника для задачи №" +
-                    taskId + ". Пропускаем. Будет обработана в следующем цикле.");
-            // НЕ добавляем в кэш — задача будет обработана снова в следующем цикле
+        if (employeesForAssignment.isEmpty()) {
+            log("WARNING", "Нет активных сотрудников для назначения задачи №" + taskId);
+            return;
+        }
+
+        // Выбираем сотрудника по очереди
+        int currentIndex = currentEmployeeIndex.getAndIncrement();
+        int employeeIndex = currentIndex % employeesForAssignment.size();
+        String selectedEmployeeLogin = employeesForAssignment.get(employeeIndex);
+        String targetExecutorId = LOGIN_TO_EXECUTOR_ID.get(selectedEmployeeLogin);
+
+        log("DEBUG", "Выбран сотрудник " + selectedEmployeeLogin +
+                " (ID: " + targetExecutorId + ") для задачи №" + taskId +
+                " (индекс в очереди: " + employeeIndex + ")");
+
+        try {
+            updateTask(client, taskId, targetExecutorId);
+            log("SUCCESS", "Задача №" + taskId +
+                    " назначена на сотрудника " + selectedEmployeeLogin + " (ID: " + targetExecutorId);
+            PROCESSED_TASK_IDS.add(taskId);
+        } catch (Exception e) {
+            logError("Ошибка обновления задачи №" + taskId, e);
         }
     }
 

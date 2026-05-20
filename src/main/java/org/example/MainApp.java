@@ -9,10 +9,17 @@ import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPut;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.ssl.SSLContexts;
+import org.apache.http.ssl.TrustStrategy;
 import org.apache.http.util.EntityUtils;
 
+import javax.net.ssl.SSLContext;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -67,7 +74,7 @@ class ConfigLoader {
 
 public class MainApp {
     private static final String AUTH = ConfigLoader.getAuth();
-    private static final String BASE_URL = "https://test1232.intraservice.ru/api/task";
+    private static final String BASE_URL = "https://support2-sand.ffoms.gov.ru/api/task";
     private static final String ACTIVE_LINE_URL = "http://192.168.100.114/api/v1/line/active";
     private static final int CHECK_INTERVAL_MS = ConfigLoader.getCheckIntervalMs();
     private static final AtomicBoolean IS_RUNNING = new AtomicBoolean(false);
@@ -78,6 +85,26 @@ public class MainApp {
     private static long lastCacheClearTime = System.currentTimeMillis();
     private static final Map<String, String> LOGIN_TO_EXECUTOR_ID = ConfigLoader.getLoginToExecutorId();
     private static final ObjectMapper mapper = new ObjectMapper();
+
+
+    private static CloseableHttpClient createHttpClientTrustingAllCerts() {
+        try {
+            TrustStrategy trustStrategy = (certificates, authType) -> true;
+
+            SSLContext sslContext = SSLContexts.custom()
+                    .loadTrustMaterial(null, trustStrategy)
+                    .build();
+
+            SSLConnectionSocketFactory sslsf = new SSLConnectionSocketFactory(
+                    sslContext, NoopHostnameVerifier.INSTANCE);
+
+            return HttpClients.custom()
+                    .setSSLSocketFactory(sslsf)
+                    .build();
+        } catch (Exception e) {
+            throw new RuntimeException("Ошибка при создании HttpClient", e);
+        }
+    }
 
     static {
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -144,72 +171,66 @@ public class MainApp {
     }
 
     private static void processTasks() {
-        //ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        RequestConfig requestConfig = RequestConfig.custom()
-                .setConnectTimeout(10000)
-                .setSocketTimeout(30000)
-                .build();
 
-        HttpClient client = HttpClientBuilder.create()
-                .setDefaultRequestConfig(requestConfig)
-                .build();
+        try (CloseableHttpClient client = createHttpClientTrustingAllCerts()) {
+            while (IS_RUNNING.get()) {
+                try {
+                    log("INFO", "Получение списка задач...");
 
-        while (IS_RUNNING.get()) {
-            try {
-                log("INFO", "Получение списка задач...");
+                    // Проверка и очистка кэша раз в 24 часа
+                    if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
+                        clearProcessedTasksCache();
+                    }
 
-                // Проверка и очистка кэша раз в 24 часа
-                if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
-                    clearProcessedTasksCache();
-                }
+                    String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds";
+                    log("DEBUG", "HTTP GET запрос: " + requestUrl);
 
-                String requestUrl = BASE_URL + "?StatusIds=31&fields=Id,Name,StatusId,Creator,ExecutorIds";
-                log("DEBUG", "HTTP GET запрос: " + requestUrl);
+                    HttpGet getRequest = new HttpGet(requestUrl);
+                    getRequest.setHeader("Authorization", AUTH);
 
-                HttpGet getRequest = new HttpGet(requestUrl);
-                getRequest.setHeader("Authorization", AUTH);
+                    HttpResponse response = client.execute(getRequest);
+                    int statusCode = response.getStatusLine().getStatusCode();
+                    String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
 
-                HttpResponse response = client.execute(getRequest);
-                int statusCode = response.getStatusLine().getStatusCode();
-                String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
+                    log("DEBUG", "HTTP ответ: код " + statusCode + ", тело: " + responseBody);
 
-                log("DEBUG", "HTTP ответ: код " + statusCode + ", тело: " + responseBody);
+                    if (statusCode == 200) {
+                        TaskList tasks = mapper.readValue(responseBody, TaskList.class);
+                        log("INFO", "Найдено задач: " + tasks.getTasks().size());
 
-                if (statusCode == 200) {
-                    TaskList tasks = mapper.readValue(responseBody, TaskList.class);
-                    log("INFO", "Найдено задач: " + tasks.getTasks().size());
-
-                    // Фильтруем задачи
-                    List<Task> unprocessedTasks = new ArrayList<>();
-                    for (Task task : tasks.getTasks()) {
-                        if (!PROCESSED_TASK_IDS.contains(task.getId())) {
-                            unprocessedTasks.add(task);
+                        // Фильтруем задачи
+                        List<Task> unprocessedTasks = new ArrayList<>();
+                        for (Task task : tasks.getTasks()) {
+                            if (!PROCESSED_TASK_IDS.contains(task.getId())) {
+                                unprocessedTasks.add(task);
+                            }
                         }
-                    }
-                    log("DEBUG", "Фильтрованных задач для обработки: " + unprocessedTasks.size());
+                        log("DEBUG", "Фильтрованных задач для обработки: " + unprocessedTasks.size());
 
-                    // Получаем список сотрудников на смене
-                    List<String> activeEmployees = getActiveEmployees(client, mapper);
-                    log("DEBUG", "Активных сотрудников: " + activeEmployees.size() + ", список: " + activeEmployees);
+                        // Получаем список сотрудников на смене
+                        List<String> activeEmployees = getActiveEmployees(client, mapper);
+                        log("DEBUG", "Активных сотрудников: " + activeEmployees.size() + ", список: " + activeEmployees);
 
-                    // Обрабатываем только отфильтрованный список
-                    for (Task task : unprocessedTasks) {
-                        if (!IS_RUNNING.get()) break;
-                        processTask(client, task, activeEmployees);
+                        // Обрабатываем только отфильтрованный список
+                        for (Task task : unprocessedTasks) {
+                            if (!IS_RUNNING.get()) break;
+                            processTask(client, task, activeEmployees);
+                        }
+                    } else {
+                        log("ERROR", "Ошибка HTTP: код " + statusCode +
+                                ", сообщение: " + response.getStatusLine().getReasonPhrase());
                     }
-                } else {
-                    log("ERROR", "Ошибка HTTP: код " + statusCode +
-                            ", сообщение: " + response.getStatusLine().getReasonPhrase());
+
+                    waitForNextCheck();
+                } catch (IOException e) {
+                    logError("Ошибка при получении данных", e);
+                    waitForNextCheck();
                 }
-
-                waitForNextCheck();
-            } catch (IOException e) {
-                logError("Ошибка при получении данных", e);
-                waitForNextCheck();
             }
+        } catch (Exception e) {
+            logError("Критическая ошибка в процессе обработки", e);
         }
-        log("INFO", "Обработка остановлена.");
     }
 
 
@@ -224,7 +245,7 @@ public class MainApp {
         }
     }
 
-    private static List<String> getActiveEmployees(HttpClient client, ObjectMapper mapper) {
+    private static List<String> getActiveEmployees(CloseableHttpClient client, ObjectMapper mapper) {
         try {
             log("DEBUG", "Запрос списка активных сотрудников: " + ACTIVE_LINE_URL);
             HttpGet getRequest = new HttpGet(ACTIVE_LINE_URL);
@@ -258,7 +279,7 @@ public class MainApp {
         return Collections.emptyList();
     }
 
-    private static String findLeastLoadedEmployee(HttpClient client, List<String> employees) {
+    private static String findLeastLoadedEmployee(CloseableHttpClient client, List<String> employees) {
         log("DEBUG", "Поиск наименее загруженного сотрудника среди: " + employees);
         String selectedEmployee = null;
         int minCount = Integer.MAX_VALUE;
@@ -311,7 +332,7 @@ public class MainApp {
         return selectedEmployee;
     }
 
-    private static void processTask(HttpClient client, Task task, List<String> activeEmployees) {
+    private static void processTask(CloseableHttpClient client, Task task, List<String> activeEmployees) {
         int taskId = task.getId();
         String executorIds = task.getExecutorIds();
 
@@ -362,7 +383,7 @@ public class MainApp {
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("ExecutorIds", executorId);
             requestBody.put("StatusId", "27");
-            requestBody.put("Comment", "Заявка в работе");
+            requestBody.put("Comment", "Здравствуйте. Информируем о том, что Ваша заявка в работе.");
             requestBody.put("IsPrivateComment", false);
 
             //ObjectMapper mapper = new ObjectMapper();

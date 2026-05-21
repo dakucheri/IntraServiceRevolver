@@ -206,7 +206,7 @@ public class MainApp {
                         clearProcessedTasksCache();
                     }
 
-                    String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds";
+                    String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds&PageSize=1000";
                     log("DEBUG", "HTTP GET запрос: " + requestUrl);
 
                     HttpGet getRequest = new HttpGet(requestUrl);

@@ -20,17 +20,22 @@ import org.apache.http.ssl.TrustStrategy;
 import org.apache.http.util.EntityUtils;
 
 import javax.net.ssl.SSLContext;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 class ConfigLoader {
     public static String getAuth() {
@@ -88,6 +93,12 @@ public class MainApp {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final AtomicInteger currentEmployeeIndex = new AtomicInteger(0);
     private static volatile List<String> currentActiveEmployees = Collections.synchronizedList(new ArrayList<>());
+    private static final Map<String, AtomicInteger> employeeTaskCount = new ConcurrentHashMap<>();
+    private static final List<AssignmentStats> assignmentHistory = Collections.synchronizedList(new ArrayList<>());
+    private static final String STATS_FILE_PATH = "/app/stats/assignment_stats.csv";
+    private static final String SUMMARY_FILE_PATH = "/app/stats/summary_stats.txt";
+
+
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -137,6 +148,7 @@ public class MainApp {
 //    }
 
     public static void main(String[] args) {
+        initializeStatsFiles(); // Инициализируем файлы статистики
         log("INIT", "Application starting with Corretto 25...");
         System.out.println("[INIT] Application starting with Corretto 25...");
 
@@ -172,13 +184,22 @@ public class MainApp {
         System.out.println("Обработано задач: " + PROCESSED_TASK_IDS);
     }
 
+
+    private static void logSeparator() {
+        String separator = "─".repeat(80); // 80 символов «─»
+        System.out.println("\n" + separator);
+    }
+
     private static void processTasks() {
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
         try (CloseableHttpClient client = createHttpClientTrustingAllCerts()) {
             while (IS_RUNNING.get()) {
+                // Горизонтальная линия для визуального разделения циклов
+                logSeparator();
+
                 try {
-                    log("INFO", "Получение списка задач...");
+                    log("INFO", "Начало нового цикла обработки задач...");
 
                     // Проверка и очистка кэша раз в 24 часа
                     if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
@@ -201,7 +222,7 @@ public class MainApp {
                         TaskList tasks = mapper.readValue(responseBody, TaskList.class);
                         log("INFO", "Найдено задач: " + tasks.getTasks().size());
 
-                        // Фильтруем задачи
+// Фильтруем задачи
                         List<Task> unprocessedTasks = new ArrayList<>();
                         for (Task task : tasks.getTasks()) {
                             if (!PROCESSED_TASK_IDS.contains(task.getId())) {
@@ -210,11 +231,18 @@ public class MainApp {
                         }
                         log("DEBUG", "Фильтрованных задач для обработки: " + unprocessedTasks.size());
 
-                        // Получаем список сотрудников на смене
+// Сортируем задачи по ID от старых к новым
+                        unprocessedTasks.sort(Comparator.comparingInt(Task::getId));
+                        log("DEBUG", "Задачи отсортированы по ID (от старых к новым): " +
+                                unprocessedTasks.stream()
+                                        .map(Task::getId)
+                                        .collect(Collectors.toList()));
+
+// Получаем список сотрудников на смене
                         List<String> activeEmployees = getActiveEmployees(client, mapper);
                         log("DEBUG", "Активных сотрудников: " + activeEmployees.size() + ", список: " + activeEmployees);
 
-                        // Обрабатываем только отфильтрованный список
+// Обрабатываем только отфильтрованный и отсортированный список
                         for (Task task : unprocessedTasks) {
                             if (!IS_RUNNING.get()) break;
                             processTask(client, task, activeEmployees);
@@ -327,6 +355,19 @@ public class MainApp {
 
         try {
             updateTask(client, taskId, targetExecutorId);
+
+            // ЗАПИСЬ СТАТИСТИКИ
+            String currentTime = getCurrentGmt3Time();
+            AssignmentStats stats = new AssignmentStats(taskId, currentTime, selectedEmployeeLogin, targetExecutorId);
+            assignmentHistory.add(stats);
+
+            // Увеличиваем счётчик для сотрудника
+            employeeTaskCount.computeIfAbsent(selectedEmployeeLogin, k -> new AtomicInteger())
+                    .incrementAndGet();
+
+            saveAssignmentStats(); // Сохраняем историю
+            saveSummaryStats();  // Сохраняем сводку
+
             log("SUCCESS", "Задача №" + taskId +
                     " назначена на сотрудника " + selectedEmployeeLogin + " (ID: " + targetExecutorId);
             PROCESSED_TASK_IDS.add(taskId);
@@ -493,5 +534,64 @@ public class MainApp {
         PROCESSED_TASK_IDS.clear();
         log("CACHE", "Очищено " + removedCount + " записей из кэша обработанных задач (ежедневная очистка)");
         lastCacheClearTime = System.currentTimeMillis();
+    }
+    public static class AssignmentStats {
+        private final int taskId;
+        private final String assignedTime;
+        private final String employeeLogin;
+        private final String executorId;
+
+        public AssignmentStats(int taskId, String assignedTime, String employeeLogin, String executorId) {
+            this.taskId = taskId;
+            this.assignedTime = assignedTime;
+            this.employeeLogin = employeeLogin;
+            this.executorId = executorId;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%d,%s,%s,%s", taskId, assignedTime, employeeLogin, executorId);
+        }
+    }
+    private static void saveAssignmentStats() {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(STATS_FILE_PATH, true))) {
+            for (AssignmentStats stats : assignmentHistory) {
+                writer.write(stats.toString());
+                writer.newLine();
+            }
+            assignmentHistory.clear(); // Очищаем после записи
+        } catch (IOException e) {
+            logError("Ошибка сохранения истории назначений", e);
+        }
+    }
+    private static void saveSummaryStats() {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH))) {
+            writer.write("СВОДНАЯ СТАТИСТИКА ПО РАСПРЕДЕЛЕНИЮ ЗАДАЧ\n");
+            writer.write("Дата обновления: " + getCurrentGmt3Time() + "\n");
+            writer.write("Всего обработано задач: " + PROCESSED_TASK_IDS.size() + "\n\n");
+            writer.write("Распределение по сотрудникам:\n");
+
+            for (Map.Entry<String, AtomicInteger> entry : employeeTaskCount.entrySet()) {
+                writer.write(String.format("%s: %d задач\n",
+                        entry.getKey(), entry.getValue().get()));
+            }
+        } catch (IOException e) {
+            logError("Ошибка сохранения сводной статистики", e);
+        }
+    }
+
+    private static void initializeStatsFiles() {
+        File statsDir = new File("/app/stats");
+        if (!statsDir.exists()) {
+            statsDir.mkdirs();
+        }
+
+        // Создаём пустые файлы, если их нет
+        try {
+            new File(STATS_FILE_PATH).createNewFile();
+            new File(SUMMARY_FILE_PATH).createNewFile();
+        } catch (IOException e) {
+            logError("Ошибка создания файлов статистики", e);
+        }
     }
 }

@@ -4,6 +4,9 @@ ENV LC_ALL=C.UTF-8
 WORKDIR /app
 COPY target/Revolver-0.2-jar-with-dependencies.jar app.jar
 
+RUN mkdir -p /app/stats
+VOLUME ["/app/stats"]
+
 # Переменные окружения
 ENV APP_AUTH="Basic aWtvcm5pbG92OiZKX24rdzkxXmo="
 ENV APP_CHECK_INTERVAL_MS=30000

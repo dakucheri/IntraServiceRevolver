@@ -28,7 +28,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.HashMap;
 import java.util.Map;
@@ -44,6 +44,19 @@ class ConfigLoader {
             throw new RuntimeException("Переменная окружения APP_AUTH не установлена");
         }
         return auth;
+    }
+
+    public static int getParallelism() {
+        String parallelismStr = System.getenv("APP_PARALLELISM");
+        if (parallelismStr == null || parallelismStr.isEmpty()) {
+            return 2; // значение по умолчанию: 2 потока
+        }
+        try {
+            return Integer.parseInt(parallelismStr);
+        } catch (NumberFormatException e) {
+            System.err.println("Некорректное значение APP_PARALLELISM, используется значение по умолчанию");
+            return 2;
+        }
     }
 
     public static int getCheckIntervalMs() {
@@ -80,7 +93,7 @@ class ConfigLoader {
 
 public class MainApp {
     private static final String AUTH = ConfigLoader.getAuth();
-    private static final String BASE_URL = "https://support2-sand.ffoms.gov.ru/api/task";
+    private static final String BASE_URL = "https://10.255.183.5/api/task";
     private static final String ACTIVE_LINE_URL = "http://192.168.100.114/api/v1/line/active";
     private static final int CHECK_INTERVAL_MS = ConfigLoader.getCheckIntervalMs();
     private static final AtomicBoolean IS_RUNNING = new AtomicBoolean(false);
@@ -97,8 +110,8 @@ public class MainApp {
     private static final List<AssignmentStats> assignmentHistory = Collections.synchronizedList(new ArrayList<>());
     private static final String STATS_FILE_PATH = "/app/stats/assignment_stats.csv";
     private static final String SUMMARY_FILE_PATH = "/app/stats/summary_stats.txt";
-
-
+    private static final int PARALLELISM = ConfigLoader.getParallelism();
+    private static final Object statsLock = new Object();
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -132,8 +145,18 @@ public class MainApp {
 
     private static void log(String level, String message) {
         String timestamp = getCurrentGmt3Time();
-        String logMessage = String.format("[%s] [%s] %s", timestamp, level, message);
-        System.out.println(logMessage); // Контейнеры захватывают stdout/stderr
+        long threadId = Thread.currentThread().getId();
+        String logMessage = String.format("[%s] [Thread-%d] [%s] %s",
+                timestamp, threadId, level, message);
+        System.out.println(logMessage);
+    }
+    private static void printThreadStats() {
+        synchronized (PROCESSED_TASK_IDS) {
+            log("STATS", "Обработано задач: " + PROCESSED_TASK_IDS.size());
+        }
+        synchronized (employeeTaskCount) {
+            log("STATS", "Распределение задач по сотрудникам: " + employeeTaskCount);
+        }
     }
 
     private static void logError(String message, Throwable e) {
@@ -195,74 +218,93 @@ public class MainApp {
 
         try (CloseableHttpClient client = createHttpClientTrustingAllCerts()) {
             while (IS_RUNNING.get()) {
-                // Горизонтальная линия для визуального разделения циклов
                 logSeparator();
 
-                try {
-                    log("INFO", "Начало нового цикла обработки задач...");
-
-                    // Проверка и очистка кэша раз в 24 часа
-                    if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
-                        clearProcessedTasksCache();
-                    }
-
-                    String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds&PageSize=1000";
-                    log("DEBUG", "HTTP GET запрос: " + requestUrl);
-
-                    HttpGet getRequest = new HttpGet(requestUrl);
-                    getRequest.setHeader("Authorization", AUTH);
-
-                    HttpResponse response = client.execute(getRequest);
-                    int statusCode = response.getStatusLine().getStatusCode();
-                    String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
-
-                    log("DEBUG", "HTTP ответ: код " + statusCode + ", тело: " + responseBody);
-
-                    if (statusCode == 200) {
-                        TaskList tasks = mapper.readValue(responseBody, TaskList.class);
-                        log("INFO", "Найдено задач: " + tasks.getTasks().size());
-
-// Фильтруем задачи
-                        List<Task> unprocessedTasks = new ArrayList<>();
-                        for (Task task : tasks.getTasks()) {
-                            if (!PROCESSED_TASK_IDS.contains(task.getId())) {
-                                unprocessedTasks.add(task);
-                            }
-                        }
-                        log("DEBUG", "Фильтрованных задач для обработки: " + unprocessedTasks.size());
-
-// Сортируем задачи по ID от старых к новым
-                        unprocessedTasks.sort(Comparator.comparingInt(Task::getId));
-                        log("DEBUG", "Задачи отсортированы по ID (от старых к новым): " +
-                                unprocessedTasks.stream()
-                                        .map(Task::getId)
-                                        .collect(Collectors.toList()));
-
-// Получаем список сотрудников на смене
-                        List<String> activeEmployees = getActiveEmployees(client, mapper);
-                        log("DEBUG", "Активных сотрудников: " + activeEmployees.size() + ", список: " + activeEmployees);
-
-// Обрабатываем только отфильтрованный и отсортированный список
-                        for (Task task : unprocessedTasks) {
-                            if (!IS_RUNNING.get()) break;
-                            processTask(client, task, activeEmployees);
-                        }
-                    } else {
-                        log("ERROR", "Ошибка HTTP: код " + statusCode +
-                                ", сообщение: " + response.getStatusLine().getReasonPhrase());
-                    }
-
-                    waitForNextCheck();
-                } catch (IOException e) {
-                    logError("Ошибка при получении данных", e);
-                    waitForNextCheck();
+                // Проверка и очистка кэша раз в 24 часа
+                if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
+                    clearProcessedTasksCache();
                 }
+
+                String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds&PageSize=50";
+                log("DEBUG", "HTTP GET запрос: " + requestUrl);
+
+                HttpGet getRequest = new HttpGet(requestUrl);
+                getRequest.setHeader("Authorization", AUTH);
+
+                HttpResponse response = client.execute(getRequest);
+                int statusCode = response.getStatusLine().getStatusCode();
+                String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
+
+                log("DEBUG", "HTTP ответ: код " + statusCode + ", тело: " + responseBody);
+
+                if (statusCode == 200) {
+                    TaskList tasks = mapper.readValue(responseBody, TaskList.class);
+                    log("INFO", "Найдено задач: " + tasks.getTasks().size());
+
+                    // Фильтруем задачи
+                    List<Task> unprocessedTasks = tasks.getTasks().stream()
+                            .filter(task -> !PROCESSED_TASK_IDS.contains(task.getId()))
+                            .collect(Collectors.toList());
+                    log("DEBUG", "Фильтрованных задач для обработки: " + unprocessedTasks.size());
+
+                    // Сортируем задачи по ID от старых к новым
+                    unprocessedTasks.sort(Comparator.comparingInt(Task::getId));
+                    log("DEBUG", "Задачи отсортированы по ID (от старых к новым): " +
+                            unprocessedTasks.stream()
+                                    .map(Task::getId)
+                                    .collect(Collectors.toList()));
+
+                    // Получаем список сотрудников на смене
+                    List<String> activeEmployees = getActiveEmployees(client, mapper);
+                    log("DEBUG", "Активных сотрудников: " + activeEmployees.size() + ", список: " + activeEmployees);
+
+                    // Параллельная обработка задач
+                    processTasksInParallel(unprocessedTasks, activeEmployees, client);
+                } else {
+                    log("ERROR", "Ошибка HTTP: код " + statusCode +
+                            ", сообщение: " + response.getStatusLine().getReasonPhrase());
+                }
+
+                waitForNextCheck();
             }
         } catch (Exception e) {
             logError("Критическая ошибка в процессе обработки", e);
         }
     }
 
+    private static void processTasksInParallel(List<Task> tasks, List<String> activeEmployees, CloseableHttpClient client) {
+        ExecutorService executor = Executors.newFixedThreadPool(PARALLELISM);
+        List<Future<?>> futures = new ArrayList<>();
+
+        for (Task task : tasks) {
+            if (!IS_RUNNING.get()) break;
+
+            Future<?> future = executor.submit(() -> processTask(client, task, activeEmployees));
+            futures.add(future);
+        }
+
+        // Ждём завершения всех задач
+        for (Future<?> future : futures) {
+            try {
+                future.get(60, TimeUnit.SECONDS); // Таймаут 60 секунд на задачу
+            } catch (TimeoutException e) {
+                logError("Таймаут выполнения задачи", e);
+            } catch (Exception e) {
+                logError("Ошибка при ожидании завершения задачи", e);
+            }
+        }
+
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        printThreadStats(); // Вывод статистики
+    }
 
     private static void waitForNextCheck() {
         try {
@@ -324,55 +366,64 @@ public class MainApp {
         int taskId = task.getId();
         String executorIds = task.getExecutorIds();
 
-        log("DEBUG", "Обработка задачи №" + taskId +
+        log("DEBUG", "Поток " + Thread.currentThread().getId() +
+                ": обработка задачи №" + taskId +
                 ", исполнитель: " + (executorIds != null ? executorIds : "отсутствует") +
                 ", активных сотрудников: " + activeEmployees.size());
 
-        // Пропускаем задачи с исполнителем и добавляем в кэш
+        synchronized (PROCESSED_TASK_IDS) {
+            if (PROCESSED_TASK_IDS.contains(taskId)) {
+                log("SKIPPED", "Поток " + Thread.currentThread().getId() +
+                        ": задача №" + taskId + " уже обработана");
+                return;
+            }
+        }
+
         if (executorIds != null && !executorIds.isEmpty()) {
             log("SKIPPED", "Задача №" + taskId + " уже имеет исполнителя: " + executorIds);
-            PROCESSED_TASK_IDS.add(taskId);
+            synchronized (PROCESSED_TASK_IDS) {
+                PROCESSED_TASK_IDS.add(taskId);
+            }
             return;
         }
 
-        // Получаем актуальный список сотрудников
         List<String> employeesForAssignment = currentActiveEmployees;
-
         if (employeesForAssignment.isEmpty()) {
             log("WARNING", "Нет активных сотрудников для назначения задачи №" + taskId);
             return;
         }
 
-        // Выбираем сотрудника по очереди
         int currentIndex = currentEmployeeIndex.getAndIncrement();
         int employeeIndex = currentIndex % employeesForAssignment.size();
         String selectedEmployeeLogin = employeesForAssignment.get(employeeIndex);
         String targetExecutorId = LOGIN_TO_EXECUTOR_ID.get(selectedEmployeeLogin);
 
-        log("DEBUG", "Выбран сотрудник " + selectedEmployeeLogin +
+        log("DEBUG", "Поток " + Thread.currentThread().getId() +
+                ": выбран сотрудник " + selectedEmployeeLogin +
                 " (ID: " + targetExecutorId + ") для задачи №" + taskId +
                 " (индекс в очереди: " + employeeIndex + ")");
 
         try {
             updateTask(client, taskId, targetExecutorId);
 
-            // ЗАПИСЬ СТАТИСТИКИ
-            String currentTime = getCurrentGmt3Time();
-            AssignmentStats stats = new AssignmentStats(taskId, currentTime, selectedEmployeeLogin, targetExecutorId);
-            assignmentHistory.add(stats);
+            synchronized (statsLock) {
+                String currentTime = getCurrentGmt3Time();
+                AssignmentStats stats = new AssignmentStats(taskId, currentTime, selectedEmployeeLogin, targetExecutorId);
+                assignmentHistory.add(stats);
+                saveAssignmentStats();
+                saveSummaryStats();
+            }
 
-            // Увеличиваем счётчик для сотрудника
-            employeeTaskCount.computeIfAbsent(selectedEmployeeLogin, k -> new AtomicInteger())
-                    .incrementAndGet();
-
-            saveAssignmentStats(); // Сохраняем историю
-            saveSummaryStats();  // Сохраняем сводку
-
-            log("SUCCESS", "Задача №" + taskId +
+            log("SUCCESS", "Поток " + Thread.currentThread().getId() +
+                    ": задача №" + taskId +
                     " назначена на сотрудника " + selectedEmployeeLogin + " (ID: " + targetExecutorId);
-            PROCESSED_TASK_IDS.add(taskId);
+
+            synchronized (PROCESSED_TASK_IDS) {
+                PROCESSED_TASK_IDS.add(taskId);
+            }
         } catch (Exception e) {
-            logError("Ошибка обновления задачи №" + taskId, e);
+            logError("Поток " + Thread.currentThread().getId() +
+                    ": ошибка обновления задачи №" + taskId, e);
         }
     }
 

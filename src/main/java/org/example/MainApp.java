@@ -26,6 +26,7 @@ import java.io.FileWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -39,6 +40,11 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+
+import java.time.LocalDate;
+import java.util.HashMap;
+import java.util.Map;
+
 
 class ConfigLoader {
     public static String getAuth() {
@@ -118,6 +124,7 @@ public class MainApp {
     private static final String WEEKLY_ARCHIVE_DIR = "/data/app_stats/archive";
     private static final long WEEK_IN_MILLIS = 7 * 24 * 60 * 60 * 1000L; // 7 дней в мс
     private static long lastArchiveCheck = System.currentTimeMillis();
+    private static final Map<LocalDate, Map<String, Integer>> dailyStats = new ConcurrentHashMap<>();
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -412,17 +419,18 @@ public class MainApp {
         try {
             updateTask(client, taskId, targetExecutorId);
 
-            // --- НАЧАЛО БЛОКА ДОБАВЛЕНИЯ ---
-            // Обновляем счётчик задач для выбранного сотрудника
-            synchronized (employeeTaskCount) {
-                AtomicInteger counter = employeeTaskCount.get(selectedEmployeeLogin);
-                if (counter == null) {
-                    counter = new AtomicInteger(0);
-                    employeeTaskCount.put(selectedEmployeeLogin, counter);
-                }
-                counter.incrementAndGet();
-            }
-            // --- КОНЕЦ БЛОКА ДОБАВЛЕНИЯ ---
+// --- НАЧАЛО БЛОКА ДОБАВЛЕНИЯ: обновление дневной статистики ---
+            LocalDate today = LocalDate.now();
+
+// Получаем статистику за сегодня (или создаём новую)
+            Map<String, Integer> todayStats = dailyStats.computeIfAbsent(
+                    today,
+                    date -> new ConcurrentHashMap<>()
+            );
+
+// Увеличиваем счётчик для выбранного сотрудника
+            todayStats.merge(selectedEmployeeLogin, 1, Integer::sum);
+// --- КОНЕЦ БЛОКА ДОБАВЛЕНИЯ ---
 
             synchronized (statsLock) {
                 String currentTime = getCurrentGmt3Time();
@@ -652,23 +660,44 @@ public class MainApp {
     private static void saveSummaryStats() {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH, false))) {
             writer.write("СВОДНАЯ СТАТИСТИКА ПО РАСПРЕДЕЛЕНИЮ ЗАДАЧ\n");
-            writer.write("Дата обновления: " + getCurrentGmt3Time() + "\n");
+            writer.write("Дата последнего обновления: " + getCurrentGmt3Time() + "\n\n");
 
-            int totalTasks = 0;
-            synchronized (employeeTaskCount) {
-                totalTasks = employeeTaskCount.values().stream()
-                        .mapToInt(AtomicInteger::get)
-                        .sum();
+            // Расчёт задач за неделю (последние 7 дней)
+            int weeklyTasks = 0;
+            LocalDate today = LocalDate.now();
+            LocalDate weekAgo = today.minusDays(6); // Включаем сегодня + 6 предыдущих дней
+
+            for (LocalDate date = weekAgo; !date.isAfter(today); date = date.plusDays(1)) {
+                Map<String, Integer> dayStats = dailyStats.get(date);
+                if (dayStats != null) {
+                    weeklyTasks += dayStats.values().stream().mapToInt(Integer::intValue).sum();
+                }
             }
 
-            writer.write("Всего обработано задач: " + totalTasks + "\n\n");
-            writer.write("Распределение по сотрудникам:\n");
+            // Расчёт задач за текущий день
+            int dailyTasks = 0;
+            Map<String, Integer> todayStats = dailyStats.get(today);
+            if (todayStats != null) {
+                dailyTasks = todayStats.values().stream().mapToInt(Integer::intValue).sum();
+            }
 
-            synchronized (employeeTaskCount) {
-                for (Map.Entry<String, AtomicInteger> entry : employeeTaskCount.entrySet()) {
-                    writer.write(String.format("%s: %d задач\n",
-                            entry.getKey(), entry.getValue().get()));
+            writer.write("Всего обработано задач за неделю: " + weeklyTasks + "\n");
+            writer.write("Всего обработано задач за текущий день: " + dailyTasks + "\n\n");
+
+            // Статистика по дням за последнюю неделю
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+            for (LocalDate date = weekAgo; !date.isAfter(today); date = date.plusDays(1)) {
+                writer.write("Распределение по сотрудникам за " + date.format(formatter) + ":\n");
+
+                Map<String, Integer> dayStats = dailyStats.get(date);
+                if (dayStats != null && !dayStats.isEmpty()) {
+                    for (Map.Entry<String, Integer> entry : dayStats.entrySet()) {
+                        writer.write("  - " + entry.getKey() + ": " + entry.getValue() + " задач\n");
+                    }
+                } else {
+                    writer.write("  (данных нет)\n");
                 }
+                writer.write("\n"); // Пустая строка между днями
             }
         } catch (IOException e) {
             logError("Ошибка сохранения сводной статистики", e);
@@ -719,36 +748,43 @@ public class MainApp {
 
     private static void checkAndArchiveWeeklyStats() {
         long now = System.currentTimeMillis();
-        if (now - lastArchiveCheck >= 24 * 60 * 60 * 1000L) { // Проверка раз в сутки
+        if (now - lastArchiveCheck >= 60 * 1000L) { // Проверка каждую минуту (60 секунд)
             lastArchiveCheck = now;
 
-            // Определяем начало и конец текущей недели (понедельник–воскресенье)
             LocalDateTime nowDateTime = LocalDateTime.now(ZoneId.of("Europe/Moscow"));
-            LocalDateTime weekStart = nowDateTime.with(java.time.DayOfWeek.MONDAY);
-            LocalDateTime weekEnd = weekStart.plusDays(6);
+            DayOfWeek currentDay = nowDateTime.getDayOfWeek();
+            int currentHour = nowDateTime.getHour();
+            int currentMinute = nowDateTime.getMinute();
 
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
-            String weekStartStr = weekStart.format(formatter);
-            String weekEndStr = weekEnd.format(formatter);
+            // Условие: воскресенье, 23:59
+            if (currentDay == DayOfWeek.SUNDAY && currentHour == 23 && currentMinute == 59) {
+                // Определяем начало и конец текущей недели (понедельник–воскресенье)
+                LocalDateTime weekStart = nowDateTime.with(DayOfWeek.MONDAY);
+                LocalDateTime weekEnd = weekStart.plusDays(6);
 
-            String archiveFileName = String.format("summary_stats_%s-%s.txt",
-                    weekStartStr, weekEndStr);
-            File archiveFile = new File(WEEKLY_ARCHIVE_DIR, archiveFileName);
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                String weekStartStr = weekStart.format(formatter);
+                String weekEndStr = weekEnd.format(formatter);
 
-            try {
-                Files.copy(
-                        Paths.get(SUMMARY_FILE_PATH),
-                        Paths.get(archiveFile.getPath()),
-                        StandardCopyOption.REPLACE_EXISTING
-                );
-                log("ARCHIVE", "Файл статистики заархивирован: " + archiveFileName);
+                String archiveFileName = String.format("summary_stats_%s-%s.txt",
+                        weekStartStr, weekEndStr);
+                File archiveFile = new File(WEEKLY_ARCHIVE_DIR, archiveFileName);
 
-                // Очищаем текущий файл
-                try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH))) {
-                    writer.write(""); // или перезаписать с пустыми заголовками
+                try {
+                    Files.copy(
+                            Paths.get(SUMMARY_FILE_PATH),
+                            Paths.get(archiveFile.getPath()),
+                            StandardCopyOption.REPLACE_EXISTING
+                    );
+                    log("ARCHIVE", "Файл статистики заархивирован: " + archiveFileName);
+
+                    // Очищаем текущий файл
+                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH))) {
+                        writer.write(""); // или перезаписать с пустыми заголовками
+                    }
+                } catch (IOException e) {
+                    logError("Ошибка архивации файла статистики", e);
                 }
-            } catch (IOException e) {
-                logError("Ошибка архивации файла статистики", e);
             }
         }
     }

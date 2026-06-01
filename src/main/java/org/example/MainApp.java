@@ -23,6 +23,9 @@ import javax.net.ssl.SSLContext;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -93,7 +96,7 @@ class ConfigLoader {
 
 public class MainApp {
     private static final String AUTH = ConfigLoader.getAuth();
-    private static final String BASE_URL = "https://10.255.183.5/api/task";
+    private static final String BASE_URL = "https://10.255.183.3/api/task";
     private static final String ACTIVE_LINE_URL = "http://192.168.100.114/api/v1/line/active";
     private static final int CHECK_INTERVAL_MS = ConfigLoader.getCheckIntervalMs();
     private static final AtomicBoolean IS_RUNNING = new AtomicBoolean(false);
@@ -112,6 +115,9 @@ public class MainApp {
     private static final String SUMMARY_FILE_PATH = "/app/stats/summary_stats.txt";
     private static final int PARALLELISM = ConfigLoader.getParallelism();
     private static final Object statsLock = new Object();
+    private static final String WEEKLY_ARCHIVE_DIR = "/data/app_stats/archive";
+    private static final long WEEK_IN_MILLIS = 7 * 24 * 60 * 60 * 1000L; // 7 дней в мс
+    private static long lastArchiveCheck = System.currentTimeMillis();
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -264,7 +270,7 @@ public class MainApp {
                     log("ERROR", "Ошибка HTTP: код " + statusCode +
                             ", сообщение: " + response.getStatusLine().getReasonPhrase());
                 }
-
+                checkAndArchiveWeeklyStats();
                 waitForNextCheck();
             }
         } catch (Exception e) {
@@ -610,13 +616,13 @@ public class MainApp {
                 writer.write(stats.toString());
                 writer.newLine();
             }
-            assignmentHistory.clear(); // Очищаем после записи
+            assignmentHistory.clear();
         } catch (IOException e) {
             logError("Ошибка сохранения истории назначений", e);
         }
     }
     private static void saveSummaryStats() {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH))) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH, false))) {
             writer.write("СВОДНАЯ СТАТИСТИКА ПО РАСПРЕДЕЛЕНИЮ ЗАДАЧ\n");
             writer.write("Дата обновления: " + getCurrentGmt3Time() + "\n");
             writer.write("Всего обработано задач: " + PROCESSED_TASK_IDS.size() + "\n\n");
@@ -632,17 +638,68 @@ public class MainApp {
     }
 
     private static void initializeStatsFiles() {
-        File statsDir = new File("/app/stats");
+        File statsDir = new File("/data/app_stats");
         if (!statsDir.exists()) {
             statsDir.mkdirs();
+            File archiveDir = new File(WEEKLY_ARCHIVE_DIR);
+            if (!archiveDir.exists()) {
+                archiveDir.mkdirs();
+            }
         }
 
-        // Создаём пустые файлы, если их нет
-        try {
-            new File(STATS_FILE_PATH).createNewFile();
-            new File(SUMMARY_FILE_PATH).createNewFile();
-        } catch (IOException e) {
-            logError("Ошибка создания файлов статистики", e);
+        // Создаём файл с заголовками, если его нет
+        File csvFile = new File(STATS_FILE_PATH);
+        if (!csvFile.exists()) {
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(csvFile))) {
+                writer.write("task_id,date,employee_id,intraservice_id\n");
+            } catch (IOException e) {
+                logError("Ошибка создания CSV с заголовками", e);
+            }
+        }
+
+        File summaryFile = new File(SUMMARY_FILE_PATH);
+        if (!summaryFile.exists()) {
+            try {
+                summaryFile.createNewFile();
+                log("INFO", "Файл сводной статистики создан: " + SUMMARY_FILE_PATH);
+            } catch (IOException e) {
+                logError("Ошибка при создании файла сводной статистики", e);
+            }
+        }
+    }
+    private static void checkAndArchiveWeeklyStats() {
+        long now = System.currentTimeMillis();
+        if (now - lastArchiveCheck >= 24 * 60 * 60 * 1000L) { // Проверка раз в сутки
+            lastArchiveCheck = now;
+
+            // Определяем начало и конец текущей недели (понедельник–воскресенье)
+            LocalDateTime nowDateTime = LocalDateTime.now(ZoneId.of("Europe/Moscow"));
+            LocalDateTime weekStart = nowDateTime.with(java.time.DayOfWeek.MONDAY);
+            LocalDateTime weekEnd = weekStart.plusDays(6);
+
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+            String weekStartStr = weekStart.format(formatter);
+            String weekEndStr = weekEnd.format(formatter);
+
+            String archiveFileName = String.format("summary_stats_%s-%s.txt",
+                    weekStartStr, weekEndStr);
+            File archiveFile = new File(WEEKLY_ARCHIVE_DIR, archiveFileName);
+
+            try {
+                Files.copy(
+                        Paths.get(SUMMARY_FILE_PATH),
+                        Paths.get(archiveFile.getPath()),
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+                log("ARCHIVE", "Файл статистики заархивирован: " + archiveFileName);
+
+                // Очищаем текущий файл
+                try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH))) {
+                    writer.write(""); // или перезаписать с пустыми заголовками
+                }
+            } catch (IOException e) {
+                logError("Ошибка архивации файла статистики", e);
+            }
         }
     }
 }

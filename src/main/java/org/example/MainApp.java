@@ -412,6 +412,18 @@ public class MainApp {
         try {
             updateTask(client, taskId, targetExecutorId);
 
+            // --- НАЧАЛО БЛОКА ДОБАВЛЕНИЯ ---
+            // Обновляем счётчик задач для выбранного сотрудника
+            synchronized (employeeTaskCount) {
+                AtomicInteger counter = employeeTaskCount.get(selectedEmployeeLogin);
+                if (counter == null) {
+                    counter = new AtomicInteger(0);
+                    employeeTaskCount.put(selectedEmployeeLogin, counter);
+                }
+                counter.incrementAndGet();
+            }
+            // --- КОНЕЦ БЛОКА ДОБАВЛЕНИЯ ---
+
             synchronized (statsLock) {
                 String currentTime = getCurrentGmt3Time();
                 AssignmentStats stats = new AssignmentStats(taskId, currentTime, selectedEmployeeLogin, targetExecutorId);
@@ -589,9 +601,16 @@ public class MainApp {
     private static void clearProcessedTasksCache() {
         int removedCount = PROCESSED_TASK_IDS.size();
         PROCESSED_TASK_IDS.clear();
+
+        // Сбрасываем счётчики задач по сотрудникам
+        synchronized (employeeTaskCount) {
+            employeeTaskCount.clear();
+        }
+
         log("CACHE", "Очищено " + removedCount + " записей из кэша обработанных задач (ежедневная очистка)");
         lastCacheClearTime = System.currentTimeMillis();
     }
+
     public static class AssignmentStats {
         private final int taskId;
         private final String assignedTime;
@@ -611,26 +630,45 @@ public class MainApp {
         }
     }
     private static void saveAssignmentStats() {
+        List<AssignmentStats> localHistory;
+        synchronized (assignmentHistory) {
+            localHistory = new ArrayList<>(assignmentHistory);
+            assignmentHistory.clear();
+        }
+
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(STATS_FILE_PATH, true))) {
-            for (AssignmentStats stats : assignmentHistory) {
+            for (AssignmentStats stats : localHistory) {
                 writer.write(stats.toString());
                 writer.newLine();
             }
-            assignmentHistory.clear();
         } catch (IOException e) {
             logError("Ошибка сохранения истории назначений", e);
+            // Возвращаем данные обратно в историю при ошибке
+            synchronized (assignmentHistory) {
+                assignmentHistory.addAll(localHistory);
+            }
         }
     }
     private static void saveSummaryStats() {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(SUMMARY_FILE_PATH, false))) {
             writer.write("СВОДНАЯ СТАТИСТИКА ПО РАСПРЕДЕЛЕНИЮ ЗАДАЧ\n");
             writer.write("Дата обновления: " + getCurrentGmt3Time() + "\n");
-            writer.write("Всего обработано задач: " + PROCESSED_TASK_IDS.size() + "\n\n");
+
+            int totalTasks = 0;
+            synchronized (employeeTaskCount) {
+                totalTasks = employeeTaskCount.values().stream()
+                        .mapToInt(AtomicInteger::get)
+                        .sum();
+            }
+
+            writer.write("Всего обработано задач: " + totalTasks + "\n\n");
             writer.write("Распределение по сотрудникам:\n");
 
-            for (Map.Entry<String, AtomicInteger> entry : employeeTaskCount.entrySet()) {
-                writer.write(String.format("%s: %d задач\n",
-                        entry.getKey(), entry.getValue().get()));
+            synchronized (employeeTaskCount) {
+                for (Map.Entry<String, AtomicInteger> entry : employeeTaskCount.entrySet()) {
+                    writer.write(String.format("%s: %d задач\n",
+                            entry.getKey(), entry.getValue().get()));
+                }
             }
         } catch (IOException e) {
             logError("Ошибка сохранения сводной статистики", e);
@@ -647,13 +685,24 @@ public class MainApp {
             }
         }
 
-        // Создаём файл с заголовками, если его нет
         File csvFile = new File(STATS_FILE_PATH);
         if (!csvFile.exists()) {
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(csvFile))) {
-                writer.write("task_id,date,employee_id,intraservice_id\n");
+                writer.write("task_id,date,employee_login,executor_id\n");
             } catch (IOException e) {
                 logError("Ошибка создания CSV с заголовками", e);
+            }
+        } else {
+            // Если файл существует, проверяем наличие заголовков
+            try {
+                List<String> lines = Files.readAllLines(Paths.get(STATS_FILE_PATH));
+                if (lines.isEmpty() || !lines.get(0).startsWith("task_id")) {
+                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(csvFile, true))) {
+                        writer.write("task_id,date,employee_login,executor_id\n");
+                    }
+                }
+            } catch (IOException e) {
+                logError("Ошибка проверки заголовков CSV", e);
             }
         }
 
@@ -667,6 +716,7 @@ public class MainApp {
             }
         }
     }
+
     private static void checkAndArchiveWeeklyStats() {
         long now = System.currentTimeMillis();
         if (now - lastArchiveCheck >= 24 * 60 * 60 * 1000L) { // Проверка раз в сутки

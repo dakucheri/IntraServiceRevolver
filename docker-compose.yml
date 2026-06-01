@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: revolver-app:latest
+    container_name: revolver-app-container
+    ports:
+      - "8080:8080"
+    environment:
+      APP_AUTH: ${APP_AUTH:-Basic aWtvcm5pbG92OiZKX24rdzkxXmo=}
+      APP_CHECK_INTERVAL_MS: ${APP_CHECK_INTERVAL_MS:-60000}
+      APP_PARALLELISM: ${APP_PARALLELISM:-5}
+      LOGIN_TO_EXECUTOR_ikornilov: ${LOGIN_TO_EXECUTOR_ikornilov:-319}
+      LOGIN_TO_EXECUTOR_abessarab: ${LOGIN_TO_EXECUTOR_abessarab:-2397}
+      LOGIN_TO_EXECUTOR_aanisimov: ${LOGIN_TO_EXECUTOR_aanisimov:-2346}
+      LOGIN_TO_EXECUTOR_avershinin: ${LOGIN_TO_EXECUTOR_avershinin:-2182}
+      LOGIN_TO_EXECUTOR_vlasova: ${LOGIN_TO_EXECUTOR_vlasova:-547}
+      LOGIN_TO_EXECUTOR_avolodina: ${LOGIN_TO_EXECUTOR_avolodina:-103}
+      LOGIN_TO_EXECUTOR_gmaslennikov: ${LOGIN_TO_EXECUTOR_gmaslennikov:-2768}
+      LOGIN_TO_EXECUTOR_npanainta: ${LOGIN_TO_EXECUTOR_npanainta:-566}
+      LOGIN_TO_EXECUTOR_drodaev: ${LOGIN_TO_EXECUTOR_drodaev:-2767}
+      LOGIN_TO_EXECUTOR_dsemenov: ${LOGIN_TO_EXECUTOR_dsemenov:-1952}
+      LOGIN_TO_EXECUTOR_schernyshova: ${LOGIN_TO_EXECUTOR_schernyshova:-104}
+      LOGIN_TO_EXECUTOR_ashkolnikov: ${LOGIN_TO_EXECUTOR_ashkolnikov:-582}
+      LOGIN_TO_EXECUTOR_rshkuro: ${LOGIN_TO_EXECUTOR_rshkuro:-2347}
+      LOGIN_TO_EXECUTOR_eyurpalova: ${LOGIN_TO_EXECUTOR_eyurpalova:-1600}
+    volumes:
+      - app_stats:/app/stats
+    restart: unless-stopped
+
+volumes:
+  app_stats:

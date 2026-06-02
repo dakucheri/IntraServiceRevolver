@@ -20,9 +20,8 @@ import org.apache.http.ssl.TrustStrategy;
 import org.apache.http.util.EntityUtils;
 
 import javax.net.ssl.SSLContext;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -30,7 +29,6 @@ import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -125,6 +123,10 @@ public class MainApp {
     private static final long WEEK_IN_MILLIS = 7 * 24 * 60 * 60 * 1000L; // 7 дней в мс
     private static long lastArchiveCheck = System.currentTimeMillis();
     private static final Map<LocalDate, Map<String, Integer>> dailyStats = new ConcurrentHashMap<>();
+    private static final String STATE_FILE_PATH = "/app/state/app_state.json";
+    private static AppState currentState = new AppState();
+    private static final long SAVE_STATE_INTERVAL_MS = 5 * 60 * 1000L; // Каждые 5 минут
+    private static long lastSaveTime = System.currentTimeMillis();
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
@@ -165,11 +167,30 @@ public class MainApp {
     }
     private static void printThreadStats() {
         synchronized (PROCESSED_TASK_IDS) {
-            log("STATS", "Обработано задач: " + PROCESSED_TASK_IDS.size());
+            log("STATS", "Обработано задач (всего): " + PROCESSED_TASK_IDS.size());
         }
-        synchronized (employeeTaskCount) {
-            log("STATS", "Распределение задач по сотрудникам: " + employeeTaskCount);
+
+        LocalDate today = LocalDate.now();
+        LocalDate weekStart = today.minusDays(today.getDayOfWeek().getValue() - 1); // понедельник текущей недели
+
+        // Расчёт задач за текущий день
+        int dailyTasks = 0;
+        Map<String, Integer> todayStats = dailyStats.get(today);
+        if (todayStats != null) {
+            dailyTasks = todayStats.values().stream().mapToInt(Integer::intValue).sum();
         }
+
+        // Расчёт задач за текущую неделю
+        int weeklyTasks = 0;
+        for (LocalDate date = weekStart; !date.isAfter(today); date = date.plusDays(1)) {
+            Map<String, Integer> dayStats = dailyStats.get(date);
+            if (dayStats != null) {
+                weeklyTasks += dayStats.values().stream().mapToInt(Integer::intValue).sum();
+            }
+        }
+
+        log("STATS", "Обработано задач за текущий день: " + dailyTasks);
+        log("STATS", "Обработано задач за текущую неделю: " + weeklyTasks);
     }
 
     private static void logError(String message, Throwable e) {
@@ -184,17 +205,18 @@ public class MainApp {
 //    }
 
     public static void main(String[] args) {
-        initializeStatsFiles(); // Инициализируем файлы статистики
+        loadState(); // Загружаем состояние при старте
+
+        initializeStatsFiles();
         log("INIT", "Application starting with Corretto 25...");
-        System.out.println("[INIT] Application starting with Corretto 25...");
 
         startProcessing();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log("SHUTDOWN", "Received stop signal. Stopping processing...");
             IS_RUNNING.set(false);
+            saveState(); // Сохраняем состояние при остановке
         }));
-
 
         try {
             Thread.currentThread().join();
@@ -236,6 +258,11 @@ public class MainApp {
                 // Проверка и очистка кэша раз в 24 часа
                 if (System.currentTimeMillis() - lastCacheClearTime >= CLEAR_CACHE_INTERVAL_MS) {
                     clearProcessedTasksCache();
+                }
+                // Периодическое сохранение состояния (каждые 5 минут)
+                if (System.currentTimeMillis() - lastSaveTime >= SAVE_STATE_INTERVAL_MS) {
+                    saveState();
+                    lastSaveTime = System.currentTimeMillis();
                 }
 
                 String requestUrl = BASE_URL + "?StatusIds=43,31&fields=Id,Name,StatusId,Creator,ExecutorIds&PageSize=50";
@@ -282,6 +309,8 @@ public class MainApp {
             }
         } catch (Exception e) {
             logError("Критическая ошибка в процессе обработки", e);
+        } finally {
+            saveState(); // Финальное сохранение при выходе из цикла
         }
     }
 
@@ -457,20 +486,19 @@ public class MainApp {
         log("DEBUG", "Подготовка к обновлению задачи №" + taskId +
                 " — назначение исполнителя ID: " + executorId);
 
+
         try {
             String updateUrl = BASE_URL + "/" + taskId;
             HttpPut putRequest = new HttpPut(updateUrl);
             putRequest.setHeader("Authorization", AUTH);
             putRequest.setHeader("Content-Type", "application/json");
 
-            // Формируем тело запроса
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("ExecutorIds", executorId);
             requestBody.put("StatusId", "27");
             requestBody.put("Comment", "Здравствуйте. Информируем о том, что Ваша заявка в работе.");
             requestBody.put("IsPrivateComment", false);
 
-            //ObjectMapper mapper = new ObjectMapper();
             String jsonBody = mapper.writeValueAsString(requestBody);
             log("DEBUG", "Тело запроса PUT для задачи №" + taskId + ": " + jsonBody);
 
@@ -478,12 +506,13 @@ public class MainApp {
 
             HttpResponse response = client.execute(putRequest);
             int statusCode = response.getStatusLine().getStatusCode();
-            String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
 
+            // Сокращённый лог: только код статуса
             log("DEBUG", "Ответ на обновление задачи №" + taskId +
-                    ": код " + statusCode + ", тело: " + responseBody);
+                    ": код " + statusCode);
 
             if (statusCode != 200 && statusCode != 204) {
+                String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
                 throw new IOException("HTTP " + statusCode +
                         " при обновлении задачи №" + taskId + ": " + responseBody);
             }
@@ -610,13 +639,13 @@ public class MainApp {
         int removedCount = PROCESSED_TASK_IDS.size();
         PROCESSED_TASK_IDS.clear();
 
-        // Сбрасываем счётчики задач по сотрудникам
         synchronized (employeeTaskCount) {
             employeeTaskCount.clear();
         }
 
         log("CACHE", "Очищено " + removedCount + " записей из кэша обработанных задач (ежедневная очистка)");
         lastCacheClearTime = System.currentTimeMillis();
+        saveState(); // Сохраняем обновлённое состояние после очистки
     }
 
     public static class AssignmentStats {
@@ -786,6 +815,72 @@ public class MainApp {
                     logError("Ошибка архивации файла статистики", e);
                 }
             }
+        }
+    }
+    public static class AppState {
+        private Set<Integer> processedTaskIds = new HashSet<>();
+        private Map<LocalDate, Map<String, Integer>> dailyStats = new ConcurrentHashMap<>();
+        private long lastCacheClearTime = System.currentTimeMillis();
+
+        // Геттеры и сеттеры
+        public Set<Integer> getProcessedTaskIds() { return processedTaskIds; }
+        public void setProcessedTaskIds(Set<Integer> processedTaskIds) { this.processedTaskIds = processedTaskIds; }
+
+        public Map<LocalDate, Map<String, Integer>> getDailyStats() { return dailyStats; }
+        public void setDailyStats(Map<LocalDate, Map<String, Integer>> dailyStats) { this.dailyStats = dailyStats; }
+
+        public long getLastCacheClearTime() { return lastCacheClearTime; }
+        public void setLastCacheClearTime(long lastCacheClearTime) { this.lastCacheClearTime = lastCacheClearTime; }
+    }
+    private static void loadState() {
+        File stateFile = new File(STATE_FILE_PATH);
+        if (!stateFile.exists()) {
+            log("INFO", "Файл состояния не найден, начинаем с чистого листа");
+            return;
+        }
+
+        try {
+            String json = new String(Files.readAllBytes(Paths.get(STATE_FILE_PATH)), StandardCharsets.UTF_8);
+            AppState loadedState = mapper.readValue(json, AppState.class);
+
+            // Восстанавливаем состояние
+            synchronized (PROCESSED_TASK_IDS) {
+                PROCESSED_TASK_IDS.clear();
+                PROCESSED_TASK_IDS.addAll(loadedState.getProcessedTaskIds());
+            }
+            dailyStats.clear();
+            dailyStats.putAll(loadedState.getDailyStats());
+            lastCacheClearTime = loadedState.getLastCacheClearTime();
+
+            log("INFO", "Состояние успешно восстановлено: " +
+                    PROCESSED_TASK_IDS.size() + " обработанных задач, " +
+                    dailyStats.size() + " дней статистики");
+        } catch (Exception e) {
+            logError("Ошибка при загрузке состояния приложения", e);
+            // Продолжаем с чистым состоянием при ошибке загрузки
+        }
+    }
+
+    private static void saveState() {
+        currentState.setProcessedTaskIds(new HashSet<>(PROCESSED_TASK_IDS));
+        currentState.setDailyStats(new HashMap<>(dailyStats));
+        currentState.setLastCacheClearTime(lastCacheClearTime);
+
+        try {
+            // Пишем во временный файл
+            String tempPath = STATE_FILE_PATH + ".tmp";
+
+            try (OutputStream os = Files.newOutputStream(Paths.get(tempPath))) {
+                os.write(mapper.writeValueAsBytes(currentState));
+            }
+
+            // Атомарно переименовываем
+            Files.move(Paths.get(tempPath), Paths.get(STATE_FILE_PATH),
+                    StandardCopyOption.REPLACE_EXISTING);
+
+            log("DEBUG", "Состояние приложения сохранено");
+        } catch (Exception e) {
+            logError("Ошибка при сохранении состояния приложения", e);
         }
     }
 }

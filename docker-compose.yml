@@ -29,10 +29,8 @@ services:
       LOGIN_TO_EXECUTOR_rshkuro: ${LOGIN_TO_EXECUTOR_rshkuro:-2347}
       LOGIN_TO_EXECUTOR_eyurpalova: ${LOGIN_TO_EXECUTOR_eyurpalova:-1600}
     volumes:
-      - app_stats:/app/stats
+      - /home/ikornilov/data/app_stats:/app/stats
+      - /home/ikornilov/data/app_state:/app/state
     restart: unless-stopped
     extra_hosts:
       - "api-server=10.255.183.3"
-
-volumes:
-  app_stats:

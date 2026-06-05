@@ -15,6 +15,7 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.ssl.SSLContextBuilder;
 import org.apache.http.ssl.SSLContexts;
 import org.apache.http.ssl.TrustStrategy;
 import org.apache.http.util.EntityUtils;
@@ -130,20 +131,18 @@ public class MainApp {
 
     private static CloseableHttpClient createHttpClientTrustingAllCerts() {
         try {
-            TrustStrategy trustStrategy = (certificates, authType) -> true;
-
-            SSLContext sslContext = SSLContexts.custom()
-                    .loadTrustMaterial(null, trustStrategy)
+            SSLContext sslContext = SSLContextBuilder
+                    .create()
+                    .loadTrustMaterial((chain, authType) -> true) // Игнорируем проверку сертификатов
                     .build();
-
-            SSLConnectionSocketFactory sslsf = new SSLConnectionSocketFactory(
-                    sslContext, NoopHostnameVerifier.INSTANCE);
 
             return HttpClients.custom()
-                    .setSSLSocketFactory(sslsf)
+                    .setSSLContext(sslContext)
+                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
                     .build();
         } catch (Exception e) {
-            throw new RuntimeException("Ошибка при создании HttpClient", e);
+            logError("Ошибка создания HTTP‑клиента с игнорированием SSL", e);
+            return HttpClients.createDefault();
         }
     }
 

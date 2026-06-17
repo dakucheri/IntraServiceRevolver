@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: revolver-app:latest
+    image: dakucheri/revolver-app:latest
     container_name: revolver-app-container
     network_mode: "host"  # Используем сеть хоста
     ports:
@@ -14,7 +14,6 @@ services:
       APP_AUTH: ${APP_AUTH:-Basic aWtvcm5pbG92OiZKX24rdzkxXmo=}
       APP_CHECK_INTERVAL_MS: ${APP_CHECK_INTERVAL_MS:-60000}
       APP_PARALLELISM: ${APP_PARALLELISM:-5}
-      LOGIN_TO_EXECUTOR_ikornilov: ${LOGIN_TO_EXECUTOR_ikornilov:-319}
       LOGIN_TO_EXECUTOR_abessarab: ${LOGIN_TO_EXECUTOR_abessarab:-2397}
       LOGIN_TO_EXECUTOR_aanisimov: ${LOGIN_TO_EXECUTOR_aanisimov:-2346}
       LOGIN_TO_EXECUTOR_avershinin: ${LOGIN_TO_EXECUTOR_avershinin:-2182}

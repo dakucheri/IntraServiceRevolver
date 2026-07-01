@@ -27,6 +27,10 @@ services:
       LOGIN_TO_EXECUTOR_ashkolnikov: ${LOGIN_TO_EXECUTOR_ashkolnikov:-582}
       LOGIN_TO_EXECUTOR_rshkuro: ${LOGIN_TO_EXECUTOR_rshkuro:-2347}
       LOGIN_TO_EXECUTOR_eyurpalova: ${LOGIN_TO_EXECUTOR_eyurpalova:-1600}
+      LOGIN_TO_EXECUTOR_agordienko: ${LOGIN_TO_EXECUTOR_agordienko:-3411}
+      LOGIN_TO_EXECUTOR_eilyukhina: ${LOGIN_TO_EXECUTOR_eilyukhina:-3410}
+      LOGIN_TO_EXECUTOR_vbezuglov: ${LOGIN_TO_EXECUTOR_vbezuglov:-3452}
+      LOGIN_TO_EXECUTOR_lmarkina: ${LOGIN_TO_EXECUTOR_lmarkina:-3453}
     volumes:
       - /home/ikornilov/data/app_stats:/app/stats
       - /home/ikornilov/data/app_state:/app/state

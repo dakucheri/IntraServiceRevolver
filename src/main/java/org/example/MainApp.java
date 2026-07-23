@@ -233,7 +233,7 @@ public class MainApp {
 
     // Обычные задачи: все сервисы кроме 47
     private static void processTasksGroup1(CloseableHttpClient client, List<String> activeEmployees) {
-        String requestUrl = BASE_URL + "?StatusIds=43,31&ServiceIds=64,63,62,61,50,49,46,48,45,42,41,44,43,32,22,21,20,17&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId&PageSize=50";
+        String requestUrl = BASE_URL + "?StatusIds=43,31&ServiceIds=65,64,63,62,61,50,49,46,48,45,42,41,44,43,32,22,21,20,17&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId&PageSize=50";
         log("DEBUG", "HTTP GET (Group1): " + requestUrl);
 
         HttpGet getRequest = new HttpGet(requestUrl);

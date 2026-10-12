@@ -3,25 +3,22 @@ name: Deploy Revolver App
 on:
   push:
     branches:
-      - master # Накатываем при пуше в main (или master)
+      - master
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
 
-      # 1. Забираем код из репозитория
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Логинимся в Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }} # Лучше использовать Access Token из настроек DockerHub вместо пароля
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 3. Собираем образ (вот тут и вызывается ваш Dockerfile) и пушим его
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -30,7 +27,6 @@ jobs:
           push: true
           tags: dakucheri/revolver-app:latest
 
-      # 4. Стучимся на сервер по SSH и обновляем контейнер
       - name: Deploy to Server via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -38,11 +34,6 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-         # Переходим в папку с проектом, где лежит обновленный docker-compose.yml и .env
             cd /home/ikornilov/IntraServiceRevolver
-            
-        # Скачиваем свежий образ, который только что запушил GitHub
             docker compose pull
-            
-        # Перезапускаем контейнер без остановки всего остального
             docker compose up -d --remove-orphans

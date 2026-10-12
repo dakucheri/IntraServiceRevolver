@@ -165,6 +165,7 @@ public class MainApp {
         initializeStatsFiles();
         log("INIT", "Application starting with Corretto 25...");
         System.out.println("[INIT] Application starting with Corretto 25...");
+        System.out.println("=== REVOLVER APP: DEPLOYED VIA GITHUB ACTIONS SUCCESS ===");
 
         startProcessing();
 

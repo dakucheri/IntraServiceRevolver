@@ -167,7 +167,6 @@ public class MainApp {
         System.out.println("[INIT] Application starting with Corretto 25...");
         System.out.println("=== REVOLVER APP: DEPLOYED VIA GITHUB ACTIONS SUCCESS ===");
         System.out.println("=== REVOLVER APP: DEPLOYED VIA GITHUB ACTIONS SUCCESS ===");
-        System.out.println("=== REVOLVER APP: DEPLOYED VIA GITHUB ACTIONS SUCCESS ===");
 
         startProcessing();
 

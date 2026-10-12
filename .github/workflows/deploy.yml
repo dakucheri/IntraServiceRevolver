@@ -13,6 +13,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # [ДОБАВЛЕНО] Настраиваем Java-окружение на машине GitHub
+      - name: Set up JDK 17  # Укажите вашу версию Java (11, 17, 21 и т.д.)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven' # Кэширование зависимостей, чтобы сборка шла быстрее
+
+      # [ДОБАВЛЕНО] Собираем проект (компилируем код и создаем тот самый jar в папке target)
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:

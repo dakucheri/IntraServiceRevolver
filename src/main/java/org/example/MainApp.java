@@ -235,7 +235,7 @@ public class MainApp {
 
     // Обычные задачи: все сервисы кроме 47
     private static void processTasksGroup1(CloseableHttpClient client, List<String> activeEmployees) {
-        String requestUrl = BASE_URL + "?StatusIds=43,31&ServiceIds=65,64,63,62,61,50,49,46,48,45,42,41,44,43,32,22,21,20,17&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId&PageSize=50";
+        String requestUrl = BASE_URL + "?StatusIds=43,31&ServiceIds=65,64,63,62,61,50,49,46,48,45,42,41,44,43,32,22,21,20,17&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId,ObserverIds&PageSize=50";
         log("DEBUG", "HTTP GET (Group1): " + requestUrl);
 
         HttpGet getRequest = new HttpGet(requestUrl);
@@ -604,7 +604,7 @@ public class MainApp {
                 " (ID: " + targetExecutorId + ") для задачи №" + taskId);
 
         try {
-            updateTask(client, taskId, targetExecutorId, isGroup2);
+            updateTask(client, task, targetExecutorId, isGroup2);
 
             // --- НАЧАЛО БЛОКА ДОБАВЛЕНИЯ: обновление дневной статистики ---
             LocalDate today = LocalDate.now();
@@ -636,20 +636,26 @@ public class MainApp {
         }
     }
 
-    private static void updateTask(HttpClient client, int taskId, String executorId, boolean isGroup2) throws IOException {
-        log("DEBUG", "Подготовка к обновлению задачи №" + taskId +
+    private static void updateTask(HttpClient client, Task task, String executorId, boolean isGroup2) throws IOException {
+        log("DEBUG", "Подготовка к обновлению задачи №" + task.getId() +
                 " — назначение исполнителя ID: " + executorId +
                 ", режим: " + (isGroup2 ? "Group2 (без смены статуса и комментария)" : "Group1 (полный режим)"));
 
         try {
-            String updateUrl = BASE_URL + "/" + taskId;
+            String updateUrl = BASE_URL + "/" + task.getId();
             HttpPut putRequest = new HttpPut(updateUrl);
             putRequest.setHeader("Authorization", AUTH);
             putRequest.setHeader("Content-Type", "application/json");
 
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("ExecutorIds", executorId);
-            requestBody.put("ObserverIds", "1598"); // Наблюдатель назначается в обоих случаях
+
+            // Получаем ObserverIds из задачи
+            String observerIds = task.getObserverIds();
+            if (observerIds == null || observerIds.isBlank()) {
+                observerIds = "1598"; // дефолтный наблюдатель
+            }
+            requestBody.put("ObserverIds", observerIds);
 
             if (!isGroup2) {
                 // Обычная логика: меняем статус и добавляем комментарий
@@ -657,10 +663,9 @@ public class MainApp {
                 requestBody.put("Comment", "Здравствуйте. Информируем о том, что Ваша заявка в работе.");
                 requestBody.put("IsPrivateComment", false);
             }
-            // Для Group2: только ExecutorIds и ObserverIds, без статуса и комментария
 
             String jsonBody = mapper.writeValueAsString(requestBody);
-            log("DEBUG", "Тело запроса PUT для задачи №" + taskId + ": " + jsonBody);
+            log("DEBUG", "Тело запроса PUT для задачи №" + task.getId() + ": " + jsonBody);
 
             putRequest.setEntity(new StringEntity(jsonBody, "UTF-8"));
 
@@ -668,16 +673,16 @@ public class MainApp {
             int statusCode = response.getStatusLine().getStatusCode();
             String responseBody = EntityUtils.toString(response.getEntity(), "UTF-8");
 
-            log("DEBUG", "Ответ на обновление задачи №" + taskId + ": код " + statusCode);
+            log("DEBUG", "Ответ на обновление задачи №" + task.getId() + ": код " + statusCode);
 
             if (statusCode != 200 && statusCode != 204) {
                 throw new IOException("HTTP " + statusCode +
-                        " при обновлении задачи №" + taskId + ": " + responseBody);
+                        " при обновлении задачи №" + task.getId() + ": " + responseBody);
             }
 
-            log("INFO", "Задача №" + taskId + " успешно обновлена (статус: " + statusCode + ")");
+            log("INFO", "Задача №" + task.getId() + " успешно обновлена (статус: " + statusCode + ")");
         } catch (Exception e) {
-            logError("Критическая ошибка при обновлении задачи №" + taskId, e);
+            logError("Критическая ошибка при обновлении задачи №" + task.getId(), e);
             throw e;
         }
     }
@@ -712,6 +717,14 @@ public class MainApp {
         private String Comment;
         @JsonProperty("ServiceId")
         private Integer ServiceId; // Добавил поле ServiceId для фильтрации по сервису
+        @JsonProperty("ObserverIds")
+        private String ObserverIds;
+        public String getObserverIds() {
+            return ObserverIds;
+        }
+        public void setObserverIds(String observerIds) {
+            this.ObserverIds = observerIds;
+        }
 
         public int getId() {
             return Id;

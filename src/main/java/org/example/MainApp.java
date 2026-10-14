@@ -295,7 +295,7 @@ public class MainApp {
     }
 
     private static List<Task> getStableTasksForGroup2(CloseableHttpClient client) throws InterruptedException {
-        String requestUrl = BASE_URL + "?ServiceIds=47,19&StatusIds=27&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId&PageSize=50";
+        String requestUrl = BASE_URL + "?ServiceIds=47,19,65&StatusIds=27&fields=Id,Name,StatusId,Creator,ExecutorIds,ServiceId&PageSize=50";
         log("DEBUG", "HTTP GET (Group2, 1-й запрос): " + requestUrl);
 
         HttpGet getRequest1 = new HttpGet(requestUrl);
